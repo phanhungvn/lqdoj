@@ -14,6 +14,7 @@ DB_PASS="123456"
 ADMIN_USER="admin"
 ADMIN_PASS="admin123456"
 
+JUDGE_KEY="${JUDGE_KEY:-a}"
 PROBLEMS_DIR="${PROBLEMS_DIR:-$APP_DIR/problems}"
 JUDGE_IMAGE="${JUDGE_IMAGE:-vnoj/judge-tier1:latest}"
 
@@ -28,7 +29,7 @@ read NUM_JUDGES
 if [[ -z "$NUM_JUDGES" || ! "$NUM_JUDGES" =~ ^[0-9]+$ ]]; then
     NUM_JUDGES=1
 fi
-echo "🚀 Hệ thống sẽ thiết lập cài đặt và kích hoạt $NUM_JUDGES máy chấm (Mỗi máy 1 Key riêng biệt)!"
+echo "🚀 Hệ thống sẽ thiết lập cài đặt và kích hoạt $NUM_JUDGES máy chấm song song!"
 echo "--------------------------------------------------------"
 
 fix_apt() {
@@ -342,6 +343,7 @@ DEFAULT_FROM_EMAIL = 'no-reply@localhost'
 SERVER_EMAIL = 'no-reply@localhost'
 REGISTRATION_OPEN = True
 
+# Quy hoạch gom toàn bộ máy chấm về cổng Server 9999
 BRIDGED_JUDGE_ADDRESS = [('0.0.0.0', 9999)]
 BRIDGED_DJANGO_ADDRESS = [('localhost', 9998)]
 
@@ -432,7 +434,32 @@ find "$APP_DIR" -name "*.pyc" -delete 2>/dev/null || true
 find "$APP_DIR" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 sleep 1
 
-echo "=== 15) KHỞI CHẠY TIẾN TRÌNH WEB & BRIDGE ==="
+echo "=== 15) TẠO FILE CẤU HÌNH TRÌNH CHẤM CHUNG ==="
+mkdir -p "$PROBLEMS_DIR/__conf__"
+cat > "$PROBLEMS_DIR/__conf__/general.yml" <<YAML
+key: "${JUDGE_KEY}"
+problem_storage_globs:
+  - /problems/**/
+runtime:
+  gcc: /usr/bin/gcc
+  g++: /usr/bin/g++
+  g++11: /usr/bin/g++
+  g++14: /usr/bin/g++
+  g++17: /usr/bin/g++
+  g++20: /usr/bin/g++
+  clang: /usr/bin/clang
+  clang++: /usr/bin/clang++
+  fpc: /usr/bin/fpc
+  python3: /usr/bin/python3
+  python: /usr/bin/python3
+  java: /usr/bin/java
+  javac: /usr/bin/javac
+  node: /usr/bin/node
+  sed: /bin/sed
+  awk: /usr/bin/awk
+YAML
+
+echo "=== 16) KHỞI CHẠY TIẾN TRÌNH WEB & BRIDGE ==="
 cd "$APP_DIR"
 nohup "$VENV_DIR/bin/python3" manage.py runserver 0.0.0.0:${PORT} > "$APP_DIR/site.log" 2>&1 &
 SITE_PID=$!
@@ -460,88 +487,37 @@ if ! ss -tlnp 2>/dev/null | grep -q ':9999'; then
     exit 1
 fi
 
-echo "=== 16) TỰ ĐỘNG ĐĂNG KÝ VÀ KHỞI CHẠY CHUỒI MÁY CHẤM PHÂN KEY BIỆT LẬP ==="
+echo "=== 17) TỰ ĐỘNG ĐĂNG KÝ VÀ KHỞI CHẠY CHUỖI MÁY CHẤM SONG SONG ==="
 export PROBLEMS_DIR="$PROBLEMS_DIR"
 export JUDGE_IMAGE="$JUDGE_IMAGE"
-
-# Xoá bỏ các cấu hình thừa có nguy cơ gây xung đột dữ liệu đọc chung
-rm -f "$PROBLEMS_DIR/judge.yml" "$PROBLEMS_DIR/general.yml"
-mkdir -p "$PROBLEMS_DIR/__conf__"
 
 for ((i=1; i<=NUM_JUDGES; i++))
 do
     IDX=$(printf "%02d" $i)
     CURRENT_JUDGE_ID="Maycham${IDX}"
     
-    # Thiết lập sinh chuỗi ký tự alphabet động: a, b, c, d...
-    if [ $i -le 26 ]; then
-        CURRENT_KEY=$(printf "\\$(printf '%03o' $((96 + i)))")
-    else
-        CURRENT_KEY="key${IDX}"
-    fi
+    echo "⚙️  Đang xử lý: $CURRENT_JUDGE_ID..."
     
-    echo "⚙️  Đang xử lý: $CURRENT_JUDGE_ID với mã bảo mật Key: '$CURRENT_KEY'..."
-    
-    # Đồng bộ dữ liệu vào Database qua Django Shell độc lập
-    "$VENV_DIR/bin/python3" manage.py shell <<PY
-from judge.models import Judge
-j = Judge.objects.filter(name="${CURRENT_JUDGE_ID}").first()
-if j:
-    j.auth_key = "${CURRENT_KEY}"
-    j.is_active = True
-    j.save()
-    print("-> [DB] Da dong bo thong tin Key vao Database!")
-else:
-    Judge.objects.create(name="${CURRENT_JUDGE_ID}", auth_key="${CURRENT_KEY}", is_active=True)
-    print("-> [DB] Khoi tao thanh cong thiet lap trong Database!")
-PY
+    # Đăng ký định danh máy chấm vào database của trang web
+    python3 manage.py addjudge "$CURRENT_JUDGE_ID" "$JUDGE_KEY" || true
 
-    # Ghi đè file .yml cô lập cho từng máy chấm cụ thể
-    cat > "$PROBLEMS_DIR/__conf__/${CURRENT_JUDGE_ID}.yml" <<YAML
-key: "${CURRENT_KEY}"
-problem_storage_globs:
-  - /problems/**/
-runtime:
-  gcc: /usr/bin/gcc
-  g++: /usr/bin/g++
-  g++11: /usr/bin/g++
-  g++14: /usr/bin/g++
-  g++17: /usr/bin/g++
-  g++20: /usr/bin/g++
-  clang: /usr/bin/clang
-  clang++: /usr/bin/clang++
-  fpc: /usr/bin/fpc
-  python3: /usr/bin/python3
-  python: /usr/bin/python3
-  java: /usr/bin/java
-  javac: /usr/bin/javac
-  node: /usr/bin/node
-  sed: /bin/sed
-  awk: /usr/bin/awk
-YAML
-
-    # Dọn sạch Container cũ tránh lỗi trùng lặp tài nguyên hệ thống
-    docker rm -f "$CURRENT_JUDGE_ID" 2>/dev/null || true
-
-    # KÍCH HOẠT VƯỢT LỖI: Sử dụng --entrypoint dmoj-judge để ép buộc container tách biệt cấu hình hoàn toàn
+    # Kích hoạt Container Docker kết nối trực tiếp vào cổng 9999 của Bridge
     docker run \
       --name "$CURRENT_JUDGE_ID" \
       --network host \
       -v "$PROBLEMS_DIR:/problems" \
-      -v "$PROBLEMS_DIR/__conf__/${CURRENT_JUDGE_ID}.yml:/judge.yml" \
-      -e JUDGE_NAME="$CURRENT_JUDGE_ID" \
-      -e JUDGE_KEY="$CURRENT_KEY" \
       --cap-add SYS_PTRACE \
-      --entrypoint dmoj-judge \
       -d \
       --restart always \
       "$JUDGE_IMAGE" \
-      -c /judge.yml \
-      127.0.0.1 \
+      run \
+      -p 9999 \
+      -c /problems/__conf__/general.yml \
+      localhost \
       "$CURRENT_JUDGE_ID" \
-      "$CURRENT_KEY"
+      "$JUDGE_KEY" > "$APP_DIR/judge-${CURRENT_JUDGE_ID}.log" 2>&1
       
-    echo "✅ Kết nối thành công: $CURRENT_JUDGE_ID đã kích hoạt hoàn tất!"
+    echo "✅ Máy chấm $CURRENT_JUDGE_ID khởi chạy thành công!"
 done
 
 IP="$(hostname -I | awk '{print $1}')"
@@ -556,9 +532,10 @@ echo ""
 echo "ADMIN     : ${ADMIN_USER}"
 echo "PASS      : ${ADMIN_PASS}"
 echo ""
-echo "SỐ LƯỢNG MÁY CHẤM HOẠT ĐỘNG: $NUM_JUDGES máy (Tách Key độc lập: a, b, c, d...)"
+echo "SỐ LƯỢNG MÁY CHẤM HOẠT ĐỘNG: $NUM_JUDGES máy (Maycham01 -> Maycham$(printf "%02d" $NUM_JUDGES))"
+echo "KEY       : ${JUDGE_KEY}"
 echo "PROBLEMS  : ${PROBLEMS_DIR}"
-echo "THƯ MỤC CONFIG ĐỘNG : ${PROBLEMS_DIR}/__conf__/"
+echo "CONFIG    : ${PROBLEMS_DIR}/__conf__/general.yml"
 echo ""
 echo "XEM TRẠNG THÁI MÁY CHẤM ONLINE: http://localhost:${PORT}/status/"
 echo "========================================================"
