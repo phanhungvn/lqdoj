@@ -1,3 +1,4 @@
+cat > ~/lqd_web_safe.sh <<'SH'
 #!/usr/bin/env bash
 set -e
 
