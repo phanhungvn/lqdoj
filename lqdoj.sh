@@ -1,9 +1,10 @@
-cat > ~/lqd_web_safe.sh <<'SH'
 #!/usr/bin/env bash
 set -e
 
 APP_DIR="$HOME/online-judge"
 VENV_DIR="$HOME/dmojsite"
+JUDGE_SERVER_DIR="$HOME/judge-server"
+
 PORT="8000"
 
 DB_NAME="dmoj"
@@ -12,6 +13,11 @@ DB_PASS="123456"
 
 ADMIN_USER="admin"
 ADMIN_PASS="admin123456"
+
+JUDGE_ID="${JUDGE_ID:-Maycham01}"
+JUDGE_KEY="${JUDGE_KEY:-a}"
+PROBLEMS_DIR="${PROBLEMS_DIR:-$APP_DIR/problems}"
+JUDGE_IMAGE="${JUDGE_IMAGE:-vnoj/judge-tier1:latest}"
 
 fix_apt() {
     sudo dpkg --configure -a || true
@@ -29,19 +35,15 @@ sudo apt install -y \
     build-essential gcc g++ make pkg-config \
     python3 python3-dev python3-pip python3-venv python-is-python3 \
     libxml2-dev libxslt1-dev zlib1g-dev gettext \
-    libjpeg-dev libffi-dev libssl-dev \
+    libjpeg-dev libffi-dev libssl-dev libseccomp-dev \
     redis-server memcached mariadb-server \
     libmysqlclient-dev default-libmysqlclient-dev \
-    docker.io docker-compose-plugin || {
-        fix_apt
-        sudo apt install -y curl git python3 python3-venv python-is-python3
-    }
+    docker.io docker-compose-plugin
 
-echo "=== START DOCKER ==="
 sudo systemctl enable --now docker || sudo service docker start || true
 sudo usermod -aG docker "$USER" || true
 
-echo "=== NODE 18 + CSS TOOLS ==="
+echo "=== NODE 18 ==="
 sudo npm remove -g sass postcss-cli postcss autoprefixer less clean-css-cli >/dev/null 2>&1 || true
 sudo apt remove -y nodejs npm >/dev/null 2>&1 || true
 sudo apt autoremove -y >/dev/null 2>&1 || true
@@ -77,7 +79,7 @@ SQL
 
 mariadb-tzinfo-to-sql /usr/share/zoneinfo | sudo mariadb -u root mysql >/dev/null 2>&1 || true
 
-echo "=== CLONE / UPDATE PROJECT ==="
+echo "=== CLONE ONLINE-JUDGE ==="
 if [ ! -d "$APP_DIR/.git" ]; then
     rm -rf "$APP_DIR"
     git clone https://github.com/LQDJudge/online-judge.git "$APP_DIR"
@@ -93,20 +95,17 @@ if [ ! -d "$VENV_DIR" ]; then
 fi
 
 source "$VENV_DIR/bin/activate"
-python3 -m pip install --upgrade pip setuptools wheel
-
+python3 -m pip install --upgrade pip setuptools wheel cython
 pip install -r requirements.txt
 pip install mysqlclient pymemcache django-redis PyMySQL gunicorn || true
 
-echo "=== LOCAL SETTINGS SAFE ==="
+echo "=== LOCAL SETTINGS ==="
 cat > "$APP_DIR/dmoj/local_settings.py" <<PY
 import os
-from pathlib import Path
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-SECRET_KEY = 'lqdoj-auto-safe-secret-key'
-
+SECRET_KEY = 'lqdoj-full-docker-secret'
 DEBUG = True
 TEMPLATE_DEBUG = True
 
@@ -151,101 +150,29 @@ USE_I18N = True
 USE_L10N = True
 USE_TZ = True
 
-# Fix email local/dev: không gửi SMTP thật, tránh ConnectionRefusedError khi đăng ký
 EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
 DEFAULT_FROM_EMAIL = 'no-reply@localhost'
 SERVER_EMAIL = 'no-reply@localhost'
-
-# Mở đăng ký local
 REGISTRATION_OPEN = True
 
-# Judge bridge config, không tự chạy judge
 BRIDGED_JUDGE_ADDRESS = [('0.0.0.0', 9999)]
 BRIDGED_DJANGO_ADDRESS = [('localhost', 9998)]
 
 DMOJ_PROBLEM_DATA_ROOT = os.path.join(BASE_DIR, 'problems')
-
-# Log file handler để các trang internal không crash vì logger.handlers rỗng
-LOG_DIR = os.path.join(BASE_DIR, 'logs')
-os.makedirs(LOG_DIR, exist_ok=True)
-
-LOGGING = {
-    'version': 1,
-    'disable_existing_loggers': False,
-    'formatters': {
-        'json': {
-            'format': '{"time":"%(asctime)s","level":"%(levelname)s","name":"%(name)s","message":"%(message)s"}'
-        },
-        'simple': {
-            'format': '[%(asctime)s] %(levelname)s %(name)s: %(message)s'
-        },
-    },
-    'handlers': {
-        'request_file': {
-            'class': 'logging.FileHandler',
-            'filename': os.path.join(LOG_DIR, 'requests.log'),
-            'formatter': 'json',
-        },
-        'slow_request_file': {
-            'class': 'logging.FileHandler',
-            'filename': os.path.join(LOG_DIR, 'slow_requests.log'),
-            'formatter': 'json',
-        },
-        'default_file': {
-            'class': 'logging.FileHandler',
-            'filename': os.path.join(LOG_DIR, 'django.log'),
-            'formatter': 'simple',
-        },
-        'console': {
-            'class': 'logging.StreamHandler',
-            'formatter': 'simple',
-        },
-    },
-    'loggers': {
-        'django': {
-            'handlers': ['default_file', 'console'],
-            'level': 'INFO',
-            'propagate': True,
-        },
-        'request': {
-            'handlers': ['request_file'],
-            'level': 'INFO',
-            'propagate': False,
-        },
-        'slow_request': {
-            'handlers': ['slow_request_file'],
-            'level': 'INFO',
-            'propagate': False,
-        },
-        'judge.request': {
-            'handlers': ['request_file'],
-            'level': 'INFO',
-            'propagate': False,
-        },
-        'judge.slow_request': {
-            'handlers': ['slow_request_file'],
-            'level': 'INFO',
-            'propagate': False,
-        },
-    }
-}
 PY
 
-mkdir -p "$APP_DIR/static" "$APP_DIR/media" "$APP_DIR/problems" "$APP_DIR/logs"
+mkdir -p "$APP_DIR/static" "$APP_DIR/media" "$PROBLEMS_DIR" "$APP_DIR/logs"
 
 echo "=== FIX CSS SCRIPT ==="
 cd "$APP_DIR"
-
 chmod +x make_style.sh || true
-
 sed -i 's/--silence-deprecation=[^ ]*//g' make_style.sh || true
 sed -i 's/--silence-deprecation//g' make_style.sh || true
 sed -i 's/python manage.py/python3 manage.py/g' make_style.sh || true
 
-echo "=== PATCH INTERNAL REQUEST LOGGER CRASH ==="
+echo "=== PATCH INTERNAL LOGGER CRASH ==="
 python3 - <<'PY'
 from pathlib import Path
-
 p = Path("judge/views/internal.py")
 if p.exists():
     s = p.read_text()
@@ -267,18 +194,13 @@ if p.exists():
     new = """class RequestTimeMixin(object):
     def get_requests_data(self):
         logger = logging.getLogger(self.log_name)
-
         if not logger.handlers:
             return []
-
         handler = logger.handlers[0]
-
         if not hasattr(handler, "baseFilename"):
             return []
-
         log_filename = handler.baseFilename
         requests = []
-
         try:
             with open(log_filename, "r") as f:
                 for line in f:
@@ -289,45 +211,36 @@ if p.exists():
                         continue
         except FileNotFoundError:
             return []
-
         return requests
 """
     if old in s:
         p.write_text(s.replace(old, new))
-        print("patched internal RequestTimeMixin")
+        print("patched")
     else:
-        print("RequestTimeMixin already patched or changed")
+        print("already patched")
 PY
 
 echo "=== BUILD CSS ==="
-./make_style.sh > "$APP_DIR/build.log" 2>&1 || {
-    echo "CSS build warning:"
-    tail -80 "$APP_DIR/build.log"
-}
+./make_style.sh > "$APP_DIR/build.log" 2>&1 || tail -80 "$APP_DIR/build.log"
 
 echo "=== MIGRATE ==="
 python3 manage.py migrate --noinput
 
-echo "=== STATIC + I18N JS SAFE FIX ==="
+echo "=== STATIC + I18N JS ==="
 python3 manage.py collectstatic --noinput || true
-
 python3 manage.py compilemessages || true
 python3 manage.py compilejsi18n || true
 
 mkdir -p "$APP_DIR/static/jsi18n/vi" "$APP_DIR/static/jsi18n/en"
 
-FOUND_VI="$(find "$APP_DIR" -path "*jsi18n*vi*" -name "djangojs.js" | head -1 || true)"
-FOUND_ANY="$(find "$APP_DIR" -path "*jsi18n*" -name "djangojs.js" | head -1 || true)"
+FOUND_JS="$(find "$APP_DIR" -path "*jsi18n*" -name "djangojs.js" | head -1 || true)"
 
-if [ -n "$FOUND_VI" ]; then
-    cp "$FOUND_VI" "$APP_DIR/static/jsi18n/vi/djangojs.js" || true
-elif [ -n "$FOUND_ANY" ]; then
-    cp "$FOUND_ANY" "$APP_DIR/static/jsi18n/vi/djangojs.js" || true
+if [ -n "$FOUND_JS" ]; then
+    cp "$FOUND_JS" "$APP_DIR/static/jsi18n/vi/djangojs.js" || true
 fi
 
 if [ ! -f "$APP_DIR/static/jsi18n/vi/djangojs.js" ]; then
-    cat > "$APP_DIR/static/jsi18n/vi/djangojs.js" <<JS
-/* Auto-created fallback djangojs.js */
+cat > "$APP_DIR/static/jsi18n/vi/djangojs.js" <<JS
 window.django = window.django || {};
 django.catalog = django.catalog || {};
 django.gettext = django.gettext || function(msgid){ return msgid; };
@@ -340,7 +253,6 @@ JS
 fi
 
 cp "$APP_DIR/static/jsi18n/vi/djangojs.js" "$APP_DIR/static/jsi18n/en/djangojs.js" || true
-
 python3 manage.py collectstatic --noinput || true
 
 echo "=== LOAD DATA ==="
@@ -348,14 +260,11 @@ python3 manage.py loaddata navbar || true
 python3 manage.py loaddata language_small || true
 python3 manage.py loaddata demo || true
 
-echo "=== ADMIN ==="
+echo "=== CREATE ADMIN ==="
 python3 manage.py shell <<PY
 from django.contrib.auth import get_user_model
-
 User = get_user_model()
-
 u = User.objects.filter(username='${ADMIN_USER}').first()
-
 if not u:
     User.objects.create_superuser('${ADMIN_USER}', 'admin@example.com', '${ADMIN_PASS}')
 else:
@@ -363,42 +272,119 @@ else:
     u.is_staff = True
     u.is_superuser = True
     u.save()
-
-print('Admin ready')
+print("Admin ready")
 PY
 
-echo "=== STOP OLD WEB ONLY ==="
+echo "=== CLONE JUDGE-SERVER ==="
+if [ ! -d "$JUDGE_SERVER_DIR/.git" ]; then
+    rm -rf "$JUDGE_SERVER_DIR"
+    git clone https://github.com/LQDJudge/judge-server.git "$JUDGE_SERVER_DIR"
+fi
+
+cd "$JUDGE_SERVER_DIR"
+git pull || true
+git submodule update --init --recursive || true
+
+echo "=== BUILD JUDGE IMAGE TIER1 ==="
+cd "$JUDGE_SERVER_DIR/.docker"
+make judge-tier1 || true
+
+echo "=== REGISTER JUDGE IN SITE ==="
+cd "$APP_DIR"
+source "$VENV_DIR/bin/activate"
+python3 manage.py addjudge "$JUDGE_ID" "$JUDGE_KEY" || true
+
+echo "=== JUDGE CONFIG ==="
+mkdir -p "$PROBLEMS_DIR/__conf__"
+
+cat > "$PROBLEMS_DIR/__conf__/general.yml" <<YAML
+key: "${JUDGE_KEY}"
+problem_storage_globs:
+  - /problems/**/
+runtime:
+  gcc: /usr/bin/gcc
+  g++: /usr/bin/g++
+  g++11: /usr/bin/g++
+  g++14: /usr/bin/g++
+  g++17: /usr/bin/g++
+  g++20: /usr/bin/g++
+  clang: /usr/bin/clang
+  clang++: /usr/bin/clang++
+  fpc: /usr/bin/fpc
+  python3: /usr/bin/python3
+  python: /usr/bin/python3
+  java: /usr/bin/java
+  javac: /usr/bin/javac
+  node: /usr/bin/node
+  sed: /bin/sed
+  awk: /usr/bin/awk
+YAML
+
+echo "=== STOP OLD PROCESSES ==="
 pkill -f "manage.py runserver" 2>/dev/null || true
+pkill -f "manage.py runbridged" 2>/dev/null || true
+docker ps -q --filter "name=judge" | xargs -r docker rm -f || true
+docker rm -f bridge 2>/dev/null || true
 
 echo "=== START WEB BACKGROUND ==="
 cd "$APP_DIR"
-
 nohup "$VENV_DIR/bin/python3" manage.py runserver 0.0.0.0:${PORT} > "$APP_DIR/site.log" 2>&1 &
+SITE_PID=$!
 
-IP=$(hostname -I | awk '{print $1}')
+echo "=== START BRIDGE ==="
+if [ -x "$APP_DIR/.docker/bridge/build.sh" ]; then
+    "$APP_DIR/.docker/bridge/build.sh" > "$APP_DIR/bridge-build.log" 2>&1 || tail -80 "$APP_DIR/bridge-build.log"
+fi
+
+if [ -x "$APP_DIR/.docker/bridge/run.sh" ]; then
+    nohup "$APP_DIR/.docker/bridge/run.sh" > "$APP_DIR/bridge.log" 2>&1 &
+else
+    nohup "$VENV_DIR/bin/python3" manage.py runbridged > "$APP_DIR/bridge.log" 2>&1 &
+fi
+
+sleep 5
+
+echo "=== START DOCKER JUDGE ==="
+export PROBLEMS_DIR="$PROBLEMS_DIR"
+export JUDGE_SERVER_DIR="$JUDGE_SERVER_DIR"
+export JUDGE_IMAGE="$JUDGE_IMAGE"
+
+if [ -x "$APP_DIR/.docker/judge/start_judge.sh" ]; then
+    nohup "$APP_DIR/.docker/judge/start_judge.sh" "$JUDGE_ID" > "$APP_DIR/judge-${JUDGE_ID}.log" 2>&1 &
+else
+    echo "Missing .docker/judge/start_judge.sh" > "$APP_DIR/judge-${JUDGE_ID}.log"
+fi
+
+IP="$(hostname -I | awk '{print $1}')"
 
 echo ""
 echo "======================================"
-echo "LQDOJ WEB ĐÃ CHẠY NGẦM"
+echo "LQDOJ FULL ĐÃ CHẠY NGẦM"
 echo ""
-echo "Local : http://localhost:${PORT}"
-echo "LAN   : http://${IP}:${PORT}"
+echo "WEB LOCAL : http://localhost:${PORT}"
+echo "WEB LAN   : http://${IP}:${PORT}"
 echo ""
-echo "Admin : ${ADMIN_USER}"
-echo "Pass  : ${ADMIN_PASS}"
+echo "ADMIN     : ${ADMIN_USER}"
+echo "PASS      : ${ADMIN_PASS}"
 echo ""
-echo "Đã fix:"
-echo "- CSS Sass --silence-deprecation"
-echo "- static/jsi18n/vi/djangojs.js"
-echo "- email đăng ký ConnectionRefusedError"
-echo "- internal_slow_request logger.handlers rỗng"
-echo "- cài Docker/git/curl/node"
+echo "JUDGE ID  : ${JUDGE_ID}"
+echo "JUDGE KEY : ${JUDGE_KEY}"
+echo "PROBLEMS  : ${PROBLEMS_DIR}"
+echo "CONFIG    : ${PROBLEMS_DIR}/__conf__/general.yml"
+echo "IMAGE     : ${JUDGE_IMAGE}"
 echo ""
-echo "Log:"
+echo "STATUS    : http://localhost:${PORT}/status/"
+echo ""
+echo "LOGS:"
 echo "tail -f ${APP_DIR}/site.log"
-echo "tail -f ${APP_DIR}/build.log"
+echo "tail -f ${APP_DIR}/bridge.log"
+echo "tail -f ${APP_DIR}/judge-${JUDGE_ID}.log"
+echo ""
+echo "Nếu Docker permission denied:"
+echo "newgrp docker"
+echo "rồi chạy lại script"
 echo "======================================"
 SH
 
-chmod +x ~/lqd_web_safe.sh
-~/lqd_web_safe.sh
+chmod +x ~/lqdoj.sh
+~/lqdoj.sh
