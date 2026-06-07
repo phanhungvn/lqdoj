@@ -5,14 +5,16 @@ APP_DIR="$HOME/online-judge"
 VENV_DIR="$HOME/dmojsite"
 JUDGE_SERVER_DIR="$HOME/judge-server"
 
-PORT="8000"
+PORT="${PORT:-8000}"
+BRIDGE_PORT="${BRIDGE_PORT:-9999}"
+JUDGE_API_PORT="${JUDGE_API_PORT:-12122}"
 
-DB_NAME="dmoj"
-DB_USER="dmoj"
-DB_PASS="123456"
+DB_NAME="${DB_NAME:-dmoj}"
+DB_USER="${DB_USER:-dmoj}"
+DB_PASS="${DB_PASS:-123456}"
 
-ADMIN_USER="admin"
-ADMIN_PASS="admin123456"
+ADMIN_USER="${ADMIN_USER:-admin}"
+ADMIN_PASS="${ADMIN_PASS:-admin123456}"
 
 JUDGE_ID="${JUDGE_ID:-Maycham01}"
 JUDGE_KEY="${JUDGE_KEY:-a}"
@@ -25,14 +27,82 @@ fix_apt() {
     sudo apt autoremove -y || true
 }
 
+install_docker_compose_fallback() {
+    if command -v docker-compose >/dev/null 2>&1; then
+        echo "docker-compose already installed: $(docker-compose version || true)"
+        return 0
+    fi
+
+    echo "docker-compose-plugin not available or not installed. Installing standalone docker-compose..."
+    ARCH="$(uname -m)"
+    case "$ARCH" in
+        x86_64|amd64) COMPOSE_ARCH="x86_64" ;;
+        aarch64|arm64) COMPOSE_ARCH="aarch64" ;;
+        *) COMPOSE_ARCH="$ARCH" ;;
+    esac
+
+    COMPOSE_VERSION="v2.29.7"
+    sudo curl -L "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-linux-${COMPOSE_ARCH}" -o /usr/local/bin/docker-compose
+    sudo chmod +x /usr/local/bin/docker-compose
+    docker-compose version || true
+}
+
+wait_port() {
+    local port="$1"
+    local name="$2"
+    local i
+    for i in $(seq 1 30); do
+        if ss -tlnp 2>/dev/null | grep -q ":${port} "; then
+            echo "${name} OK: port ${port} is LISTEN"
+            return 0
+        fi
+        sleep 1
+    done
+    echo "WARNING: ${name} port ${port} is not LISTEN yet"
+    return 1
+}
+
+ensure_bridge_running() {
+    echo "=== START BRIDGE ==="
+    cd "$APP_DIR"
+    pkill -f "manage.py runbridged" 2>/dev/null || true
+    nohup "$VENV_DIR/bin/python3" manage.py runbridged > "$APP_DIR/bridge.log" 2>&1 &
+    sleep 3
+    cat "$APP_DIR/bridge.log" || true
+    wait_port "$BRIDGE_PORT" "Bridge" || true
+}
+
+start_judge_container() {
+    echo "=== START DOCKER JUDGE ==="
+    docker rm -f "$JUDGE_ID" 2>/dev/null || true
+
+    # IMPORTANT:
+    # vnoj/judge-tier1 needs command: run -p PORT -c CONFIG SERVER_HOST JUDGE_NAME JUDGE_KEY
+    # --network host lets container connect to localhost:9999 on host/Codespaces.
+    sudo docker run \
+        --name "$JUDGE_ID" \
+        --network host \
+        -v "$PROBLEMS_DIR:/problems" \
+        --cap-add SYS_PTRACE \
+        -d \
+        --restart always \
+        "$JUDGE_IMAGE" \
+        run \
+        -p "$BRIDGE_PORT" \
+        -c "/problems/${JUDGE_ID}.yml" \
+        localhost \
+        "$JUDGE_ID" \
+        "$JUDGE_KEY"
+
+    sleep 5
+    sudo docker logs --tail 120 "$JUDGE_ID" || true
+}
+
 echo "=== FIX APT ==="
 fix_apt
 
 echo "=== INSTALL PACKAGES ==="
 sudo apt update
-
-# Cài các gói nền trước. KHÔNG cài docker-compose-plugin ở đây
-# vì nhiều bản Ubuntu/Debian không có package này trong repo mặc định.
 sudo apt install -y \
     curl git wget ca-certificates gnupg lsb-release software-properties-common \
     build-essential gcc g++ make pkg-config \
@@ -41,49 +111,12 @@ sudo apt install -y \
     libjpeg-dev libffi-dev libssl-dev libseccomp-dev \
     redis-server memcached mariadb-server \
     libmysqlclient-dev default-libmysqlclient-dev \
-    docker.io
+    docker.io || true
 
-install_docker_compose() {
-    echo "=== INSTALL DOCKER COMPOSE ==="
+# docker-compose-plugin may not exist on some Ubuntu/Debian/Codespaces images.
+sudo apt install -y docker-compose-plugin || install_docker_compose_fallback
 
-    # Cách 1: thử cài plugin nếu repo có. Nếu không có thì bỏ qua, không dừng script.
-    if apt-cache policy docker-compose-plugin 2>/dev/null | grep -q "Candidate: [^(]"; then
-        sudo apt install -y docker-compose-plugin || true
-    else
-        echo "docker-compose-plugin không có trong repo apt hiện tại -> dùng bản standalone."
-    fi
-
-    # Nếu đã có docker compose v2 thì xong.
-    if docker compose version >/dev/null 2>&1; then
-        docker compose version || true
-        return 0
-    fi
-
-    # Cách 2: fallback cài docker-compose standalone.
-    COMPOSE_VERSION="${COMPOSE_VERSION:-v2.27.1}"
-    ARCH="$(uname -m)"
-    case "$ARCH" in
-        x86_64|amd64) COMPOSE_ARCH="x86_64" ;;
-        aarch64|arm64) COMPOSE_ARCH="aarch64" ;;
-        armv7l) COMPOSE_ARCH="armv7" ;;
-        *) COMPOSE_ARCH="$ARCH" ;;
-    esac
-
-    sudo curl -L "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-linux-${COMPOSE_ARCH}" \
-        -o /usr/local/bin/docker-compose
-    sudo chmod +x /usr/local/bin/docker-compose
-
-    # Tạo wrapper để lệnh `docker compose` cũng chạy được nếu máy thiếu plugin.
-    sudo mkdir -p /usr/local/lib/docker/cli-plugins
-    sudo ln -sf /usr/local/bin/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
-
-    docker-compose version || true
-    docker compose version || true
-}
-
-install_docker_compose
-
-sudo systemctl enable --now docker || sudo service docker start || true
+sudo systemctl enable --now docker 2>/dev/null || sudo service docker start || true
 sudo usermod -aG docker "$USER" || true
 
 echo "=== NODE 18 ==="
@@ -142,13 +175,13 @@ python3 -m pip install --upgrade pip setuptools wheel cython
 pip install -r requirements.txt
 pip install mysqlclient pymemcache django-redis PyMySQL gunicorn || true
 
-echo "=== LOCAL SETTINGS ==="
+echo "=== LOCAL SETTINGS - MAIL OFF ==="
 cat > "$APP_DIR/dmoj/local_settings.py" <<PY
 import os
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-SECRET_KEY = 'lqdoj-full-docker-secret'
+SECRET_KEY = 'lqdoj-full-fixed-secret'
 DEBUG = True
 TEMPLATE_DEBUG = True
 
@@ -188,17 +221,28 @@ MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 
 LANGUAGE_CODE = 'vi'
 TIME_ZONE = 'Asia/Ho_Chi_Minh'
-
 USE_I18N = True
 USE_L10N = True
 USE_TZ = True
 
-EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+# ==============================
+# TẮT CHỨC NĂNG GỬI MAIL THẬT
+# ==============================
+# Dummy backend: mọi email đều bị bỏ qua, không gửi SMTP thật.
+EMAIL_BACKEND = 'django.core.mail.backends.dummy.EmailBackend'
 DEFAULT_FROM_EMAIL = 'no-reply@localhost'
 SERVER_EMAIL = 'no-reply@localhost'
+EMAIL_HOST = 'localhost'
+EMAIL_PORT = 25
+EMAIL_HOST_USER = ''
+EMAIL_HOST_PASSWORD = ''
+EMAIL_USE_TLS = False
+EMAIL_USE_SSL = False
+
 REGISTRATION_OPEN = True
 
-BRIDGED_JUDGE_ADDRESS = [('0.0.0.0', 9999)]
+# Bridge nghe port 9999 cho máy chấm.
+BRIDGED_JUDGE_ADDRESS = [('0.0.0.0', ${BRIDGE_PORT})]
 BRIDGED_DJANGO_ADDRESS = [('localhost', 9998)]
 
 DMOJ_PROBLEM_DATA_ROOT = os.path.join(BASE_DIR, 'problems')
@@ -219,7 +263,7 @@ from pathlib import Path
 p = Path("judge/views/internal.py")
 if p.exists():
     s = p.read_text()
-    old = """class RequestTimeMixin(object):
+    old = '''class RequestTimeMixin(object):
     def get_requests_data(self):
         logger = logging.getLogger(self.log_name)
         log_filename = logger.handlers[0].baseFilename
@@ -233,8 +277,8 @@ if p.exists():
                 except:
                     continue
         return requests
-"""
-    new = """class RequestTimeMixin(object):
+'''
+    new = '''class RequestTimeMixin(object):
     def get_requests_data(self):
         logger = logging.getLogger(self.log_name)
         if not logger.handlers:
@@ -255,16 +299,16 @@ if p.exists():
         except FileNotFoundError:
             return []
         return requests
-"""
+'''
     if old in s:
         p.write_text(s.replace(old, new))
         print("patched")
     else:
-        print("already patched")
+        print("already patched or pattern not found")
 PY
 
 echo "=== BUILD CSS ==="
-./make_style.sh > "$APP_DIR/build.log" 2>&1 || tail -80 "$APP_DIR/build.log"
+./make_style.sh > "$APP_DIR/build.log" 2>&1 || tail -100 "$APP_DIR/build.log"
 
 echo "=== MIGRATE ==="
 python3 manage.py migrate --noinput
@@ -275,7 +319,6 @@ python3 manage.py compilemessages || true
 python3 manage.py compilejsi18n || true
 
 mkdir -p "$APP_DIR/static/jsi18n/vi" "$APP_DIR/static/jsi18n/en"
-
 FOUND_JS="$(find "$APP_DIR" -path "*jsi18n*" -name "djangojs.js" | head -1 || true)"
 
 if [ -n "$FOUND_JS" ]; then
@@ -315,7 +358,7 @@ else:
     u.is_staff = True
     u.is_superuser = True
     u.save()
-print("Admin ready")
+print('Admin ready')
 PY
 
 echo "=== CLONE JUDGE-SERVER ==="
@@ -329,8 +372,12 @@ git pull || true
 git submodule update --init --recursive || true
 
 echo "=== BUILD JUDGE IMAGE TIER1 ==="
-cd "$JUDGE_SERVER_DIR/.docker"
-make judge-tier1 || true
+if [ -d "$JUDGE_SERVER_DIR/.docker" ]; then
+    cd "$JUDGE_SERVER_DIR/.docker"
+    make judge-tier1 || true
+else
+    echo "WARNING: $JUDGE_SERVER_DIR/.docker not found. Will use existing image: $JUDGE_IMAGE"
+fi
 
 echo "=== REGISTER JUDGE IN SITE ==="
 cd "$APP_DIR"
@@ -338,9 +385,10 @@ source "$VENV_DIR/bin/activate"
 python3 manage.py addjudge "$JUDGE_ID" "$JUDGE_KEY" || true
 
 echo "=== JUDGE CONFIG ==="
-mkdir -p "$PROBLEMS_DIR/__conf__"
+mkdir -p "$PROBLEMS_DIR"
+rm -rf "$PROBLEMS_DIR/__conf__" 2>/dev/null || true
 
-cat > "$PROBLEMS_DIR/__conf__/general.yml" <<YAML
+cat > "$PROBLEMS_DIR/${JUDGE_ID}.yml" <<YAML
 key: "${JUDGE_KEY}"
 problem_storage_globs:
   - /problems/**/
@@ -366,37 +414,17 @@ YAML
 echo "=== STOP OLD PROCESSES ==="
 pkill -f "manage.py runserver" 2>/dev/null || true
 pkill -f "manage.py runbridged" 2>/dev/null || true
-docker ps -q --filter "name=judge" | xargs -r docker rm -f || true
+docker rm -f "$JUDGE_ID" 2>/dev/null || true
 docker rm -f bridge 2>/dev/null || true
 
 echo "=== START WEB BACKGROUND ==="
 cd "$APP_DIR"
 nohup "$VENV_DIR/bin/python3" manage.py runserver 0.0.0.0:${PORT} > "$APP_DIR/site.log" 2>&1 &
-SITE_PID=$!
+sleep 3
+wait_port "$PORT" "Web" || true
 
-echo "=== START BRIDGE ==="
-if [ -x "$APP_DIR/.docker/bridge/build.sh" ]; then
-    "$APP_DIR/.docker/bridge/build.sh" > "$APP_DIR/bridge-build.log" 2>&1 || tail -80 "$APP_DIR/bridge-build.log"
-fi
-
-if [ -x "$APP_DIR/.docker/bridge/run.sh" ]; then
-    nohup "$APP_DIR/.docker/bridge/run.sh" > "$APP_DIR/bridge.log" 2>&1 &
-else
-    nohup "$VENV_DIR/bin/python3" manage.py runbridged > "$APP_DIR/bridge.log" 2>&1 &
-fi
-
-sleep 5
-
-echo "=== START DOCKER JUDGE ==="
-export PROBLEMS_DIR="$PROBLEMS_DIR"
-export JUDGE_SERVER_DIR="$JUDGE_SERVER_DIR"
-export JUDGE_IMAGE="$JUDGE_IMAGE"
-
-if [ -x "$APP_DIR/.docker/judge/start_judge.sh" ]; then
-    nohup "$APP_DIR/.docker/judge/start_judge.sh" "$JUDGE_ID" > "$APP_DIR/judge-${JUDGE_ID}.log" 2>&1 &
-else
-    echo "Missing .docker/judge/start_judge.sh" > "$APP_DIR/judge-${JUDGE_ID}.log"
-fi
+ensure_bridge_running
+start_judge_container
 
 IP="$(hostname -I | awk '{print $1}')"
 
@@ -410,24 +438,23 @@ echo ""
 echo "ADMIN     : ${ADMIN_USER}"
 echo "PASS      : ${ADMIN_PASS}"
 echo ""
+echo "MAIL      : OFF - dummy backend, không gửi SMTP thật"
+echo ""
 echo "JUDGE ID  : ${JUDGE_ID}"
 echo "JUDGE KEY : ${JUDGE_KEY}"
 echo "PROBLEMS  : ${PROBLEMS_DIR}"
-echo "CONFIG    : ${PROBLEMS_DIR}/__conf__/general.yml"
+echo "CONFIG    : ${PROBLEMS_DIR}/${JUDGE_ID}.yml"
 echo "IMAGE     : ${JUDGE_IMAGE}"
+echo "BRIDGE    : localhost:${BRIDGE_PORT}"
 echo ""
 echo "STATUS    : http://localhost:${PORT}/status/"
 echo ""
 echo "LOGS:"
 echo "tail -f ${APP_DIR}/site.log"
 echo "tail -f ${APP_DIR}/bridge.log"
-echo "tail -f ${APP_DIR}/judge-${JUDGE_ID}.log"
+echo "sudo docker logs -f ${JUDGE_ID}"
 echo ""
 echo "Nếu Docker permission denied:"
 echo "newgrp docker"
 echo "rồi chạy lại script"
 echo "======================================"
-SH
-
-chmod +x ~/lqdoj.sh
-~/lqdoj.sh
