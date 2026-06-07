@@ -21,7 +21,7 @@ fix_apt() {
 echo "=== FIX APT ==="
 fix_apt
 
-echo "=== BASIC PACKAGES ==="
+echo "=== INSTALL PACKAGES ==="
 sudo apt update
 sudo apt install -y \
     curl git wget ca-certificates gnupg lsb-release software-properties-common \
@@ -30,20 +30,17 @@ sudo apt install -y \
     libxml2-dev libxslt1-dev zlib1g-dev gettext \
     libjpeg-dev libffi-dev libssl-dev \
     redis-server memcached mariadb-server \
-    libmysqlclient-dev default-libmysqlclient-dev || {
+    libmysqlclient-dev default-libmysqlclient-dev \
+    docker.io docker-compose-plugin || {
         fix_apt
         sudo apt install -y curl git python3 python3-venv python-is-python3
     }
 
-echo "=== DOCKER ==="
-if ! command -v docker >/dev/null 2>&1; then
-    sudo apt install -y docker.io docker-compose-plugin || true
-fi
-
+echo "=== START DOCKER ==="
 sudo systemctl enable --now docker || sudo service docker start || true
 sudo usermod -aG docker "$USER" || true
 
-echo "=== NODE 18 ==="
+echo "=== NODE 18 + CSS TOOLS ==="
 sudo npm remove -g sass postcss-cli postcss autoprefixer less clean-css-cli >/dev/null 2>&1 || true
 sudo apt remove -y nodejs npm >/dev/null 2>&1 || true
 sudo apt autoremove -y >/dev/null 2>&1 || true
@@ -79,7 +76,7 @@ SQL
 
 mariadb-tzinfo-to-sql /usr/share/zoneinfo | sudo mariadb -u root mysql >/dev/null 2>&1 || true
 
-echo "=== CLONE PROJECT ==="
+echo "=== CLONE / UPDATE PROJECT ==="
 if [ ! -d "$APP_DIR/.git" ]; then
     rm -rf "$APP_DIR"
     git clone https://github.com/LQDJudge/online-judge.git "$APP_DIR"
@@ -95,18 +92,19 @@ if [ ! -d "$VENV_DIR" ]; then
 fi
 
 source "$VENV_DIR/bin/activate"
-
 python3 -m pip install --upgrade pip setuptools wheel
+
 pip install -r requirements.txt
 pip install mysqlclient pymemcache django-redis PyMySQL gunicorn || true
 
-echo "=== LOCAL SETTINGS ==="
+echo "=== LOCAL SETTINGS SAFE ==="
 cat > "$APP_DIR/dmoj/local_settings.py" <<PY
 import os
+from pathlib import Path
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-SECRET_KEY = 'lqdoj-auto-secret-key'
+SECRET_KEY = 'lqdoj-auto-safe-secret-key'
 
 DEBUG = True
 TEMPLATE_DEBUG = True
@@ -152,13 +150,87 @@ USE_I18N = True
 USE_L10N = True
 USE_TZ = True
 
+# Fix email local/dev: không gửi SMTP thật, tránh ConnectionRefusedError khi đăng ký
+EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+DEFAULT_FROM_EMAIL = 'no-reply@localhost'
+SERVER_EMAIL = 'no-reply@localhost'
+
+# Mở đăng ký local
+REGISTRATION_OPEN = True
+
+# Judge bridge config, không tự chạy judge
 BRIDGED_JUDGE_ADDRESS = [('0.0.0.0', 9999)]
 BRIDGED_DJANGO_ADDRESS = [('localhost', 9998)]
 
 DMOJ_PROBLEM_DATA_ROOT = os.path.join(BASE_DIR, 'problems')
+
+# Log file handler để các trang internal không crash vì logger.handlers rỗng
+LOG_DIR = os.path.join(BASE_DIR, 'logs')
+os.makedirs(LOG_DIR, exist_ok=True)
+
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'json': {
+            'format': '{"time":"%(asctime)s","level":"%(levelname)s","name":"%(name)s","message":"%(message)s"}'
+        },
+        'simple': {
+            'format': '[%(asctime)s] %(levelname)s %(name)s: %(message)s'
+        },
+    },
+    'handlers': {
+        'request_file': {
+            'class': 'logging.FileHandler',
+            'filename': os.path.join(LOG_DIR, 'requests.log'),
+            'formatter': 'json',
+        },
+        'slow_request_file': {
+            'class': 'logging.FileHandler',
+            'filename': os.path.join(LOG_DIR, 'slow_requests.log'),
+            'formatter': 'json',
+        },
+        'default_file': {
+            'class': 'logging.FileHandler',
+            'filename': os.path.join(LOG_DIR, 'django.log'),
+            'formatter': 'simple',
+        },
+        'console': {
+            'class': 'logging.StreamHandler',
+            'formatter': 'simple',
+        },
+    },
+    'loggers': {
+        'django': {
+            'handlers': ['default_file', 'console'],
+            'level': 'INFO',
+            'propagate': True,
+        },
+        'request': {
+            'handlers': ['request_file'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'slow_request': {
+            'handlers': ['slow_request_file'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'judge.request': {
+            'handlers': ['request_file'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'judge.slow_request': {
+            'handlers': ['slow_request_file'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+    }
+}
 PY
 
-mkdir -p "$APP_DIR/static" "$APP_DIR/media" "$APP_DIR/problems"
+mkdir -p "$APP_DIR/static" "$APP_DIR/media" "$APP_DIR/problems" "$APP_DIR/logs"
 
 echo "=== FIX CSS SCRIPT ==="
 cd "$APP_DIR"
@@ -169,6 +241,63 @@ sed -i 's/--silence-deprecation=[^ ]*//g' make_style.sh || true
 sed -i 's/--silence-deprecation//g' make_style.sh || true
 sed -i 's/python manage.py/python3 manage.py/g' make_style.sh || true
 
+echo "=== PATCH INTERNAL REQUEST LOGGER CRASH ==="
+python3 - <<'PY'
+from pathlib import Path
+
+p = Path("judge/views/internal.py")
+if p.exists():
+    s = p.read_text()
+    old = """class RequestTimeMixin(object):
+    def get_requests_data(self):
+        logger = logging.getLogger(self.log_name)
+        log_filename = logger.handlers[0].baseFilename
+        requests = []
+
+        with open(log_filename, "r") as f:
+            for line in f:
+                try:
+                    info = json.loads(line)
+                    requests.append(info)
+                except:
+                    continue
+        return requests
+"""
+    new = """class RequestTimeMixin(object):
+    def get_requests_data(self):
+        logger = logging.getLogger(self.log_name)
+
+        if not logger.handlers:
+            return []
+
+        handler = logger.handlers[0]
+
+        if not hasattr(handler, "baseFilename"):
+            return []
+
+        log_filename = handler.baseFilename
+        requests = []
+
+        try:
+            with open(log_filename, "r") as f:
+                for line in f:
+                    try:
+                        info = json.loads(line)
+                        requests.append(info)
+                    except Exception:
+                        continue
+        except FileNotFoundError:
+            return []
+
+        return requests
+"""
+    if old in s:
+        p.write_text(s.replace(old, new))
+        print("patched internal RequestTimeMixin")
+    else:
+        print("RequestTimeMixin already patched or changed")
+PY
+
 echo "=== BUILD CSS ==="
 ./make_style.sh > "$APP_DIR/build.log" 2>&1 || {
     echo "CSS build warning:"
@@ -178,18 +307,21 @@ echo "=== BUILD CSS ==="
 echo "=== MIGRATE ==="
 python3 manage.py migrate --noinput
 
-echo "=== STATIC + JS I18N FIX ==="
+echo "=== STATIC + I18N JS SAFE FIX ==="
 python3 manage.py collectstatic --noinput || true
 
 python3 manage.py compilemessages || true
 python3 manage.py compilejsi18n || true
 
-mkdir -p "$APP_DIR/static/jsi18n/vi"
+mkdir -p "$APP_DIR/static/jsi18n/vi" "$APP_DIR/static/jsi18n/en"
 
-FOUND_DJANGOJS="$(find "$APP_DIR" -path "*jsi18n*" -name "djangojs.js" | head -1 || true)"
+FOUND_VI="$(find "$APP_DIR" -path "*jsi18n*vi*" -name "djangojs.js" | head -1 || true)"
+FOUND_ANY="$(find "$APP_DIR" -path "*jsi18n*" -name "djangojs.js" | head -1 || true)"
 
-if [ -n "$FOUND_DJANGOJS" ]; then
-    cp "$FOUND_DJANGOJS" "$APP_DIR/static/jsi18n/vi/djangojs.js" || true
+if [ -n "$FOUND_VI" ]; then
+    cp "$FOUND_VI" "$APP_DIR/static/jsi18n/vi/djangojs.js" || true
+elif [ -n "$FOUND_ANY" ]; then
+    cp "$FOUND_ANY" "$APP_DIR/static/jsi18n/vi/djangojs.js" || true
 fi
 
 if [ ! -f "$APP_DIR/static/jsi18n/vi/djangojs.js" ]; then
@@ -206,11 +338,7 @@ django.interpolate = django.interpolate || function(fmt, obj, named){ return fmt
 JS
 fi
 
-mkdir -p "$APP_DIR/static/jsi18n/en"
-
-if [ ! -f "$APP_DIR/static/jsi18n/en/djangojs.js" ]; then
-    cp "$APP_DIR/static/jsi18n/vi/djangojs.js" "$APP_DIR/static/jsi18n/en/djangojs.js" || true
-fi
+cp "$APP_DIR/static/jsi18n/vi/djangojs.js" "$APP_DIR/static/jsi18n/en/djangojs.js" || true
 
 python3 manage.py collectstatic --noinput || true
 
@@ -238,7 +366,7 @@ else:
 print('Admin ready')
 PY
 
-echo "=== STOP OLD WEB ==="
+echo "=== STOP OLD WEB ONLY ==="
 pkill -f "manage.py runserver" 2>/dev/null || true
 
 echo "=== START WEB BACKGROUND ==="
@@ -258,17 +386,18 @@ echo ""
 echo "Admin : ${ADMIN_USER}"
 echo "Pass  : ${ADMIN_PASS}"
 echo ""
+echo "Đã fix:"
+echo "- CSS Sass --silence-deprecation"
+echo "- static/jsi18n/vi/djangojs.js"
+echo "- email đăng ký ConnectionRefusedError"
+echo "- internal_slow_request logger.handlers rỗng"
+echo "- cài Docker/git/curl/node"
+echo ""
 echo "Log:"
 echo "tail -f ${APP_DIR}/site.log"
-echo ""
-echo "Build CSS log:"
 echo "tail -f ${APP_DIR}/build.log"
-echo ""
-echo "Docker đã cài."
-echo "Nếu Docker lỗi quyền, chạy:"
-echo "newgrp docker"
 echo "======================================"
 SH
 
-chmod +x ~/lqd_web.sh
-~/lqd_web.sh
+chmod +x ~/lqd_web_safe.sh
+~/lqd_web_safe.sh
