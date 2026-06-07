@@ -30,6 +30,9 @@ fix_apt
 
 echo "=== INSTALL PACKAGES ==="
 sudo apt update
+
+# Cài các gói nền trước. KHÔNG cài docker-compose-plugin ở đây
+# vì nhiều bản Ubuntu/Debian không có package này trong repo mặc định.
 sudo apt install -y \
     curl git wget ca-certificates gnupg lsb-release software-properties-common \
     build-essential gcc g++ make pkg-config \
@@ -38,7 +41,47 @@ sudo apt install -y \
     libjpeg-dev libffi-dev libssl-dev libseccomp-dev \
     redis-server memcached mariadb-server \
     libmysqlclient-dev default-libmysqlclient-dev \
-    docker.io docker-compose-plugin
+    docker.io
+
+install_docker_compose() {
+    echo "=== INSTALL DOCKER COMPOSE ==="
+
+    # Cách 1: thử cài plugin nếu repo có. Nếu không có thì bỏ qua, không dừng script.
+    if apt-cache policy docker-compose-plugin 2>/dev/null | grep -q "Candidate: [^(]"; then
+        sudo apt install -y docker-compose-plugin || true
+    else
+        echo "docker-compose-plugin không có trong repo apt hiện tại -> dùng bản standalone."
+    fi
+
+    # Nếu đã có docker compose v2 thì xong.
+    if docker compose version >/dev/null 2>&1; then
+        docker compose version || true
+        return 0
+    fi
+
+    # Cách 2: fallback cài docker-compose standalone.
+    COMPOSE_VERSION="${COMPOSE_VERSION:-v2.27.1}"
+    ARCH="$(uname -m)"
+    case "$ARCH" in
+        x86_64|amd64) COMPOSE_ARCH="x86_64" ;;
+        aarch64|arm64) COMPOSE_ARCH="aarch64" ;;
+        armv7l) COMPOSE_ARCH="armv7" ;;
+        *) COMPOSE_ARCH="$ARCH" ;;
+    esac
+
+    sudo curl -L "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-linux-${COMPOSE_ARCH}" \
+        -o /usr/local/bin/docker-compose
+    sudo chmod +x /usr/local/bin/docker-compose
+
+    # Tạo wrapper để lệnh `docker compose` cũng chạy được nếu máy thiếu plugin.
+    sudo mkdir -p /usr/local/lib/docker/cli-plugins
+    sudo ln -sf /usr/local/bin/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
+
+    docker-compose version || true
+    docker compose version || true
+}
+
+install_docker_compose
 
 sudo systemctl enable --now docker || sudo service docker start || true
 sudo usermod -aG docker "$USER" || true
