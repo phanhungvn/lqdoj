@@ -3,7 +3,6 @@ set -e
 
 APP_DIR="$HOME/online-judge"
 VENV_DIR="$HOME/dmojsite"
-
 PORT="8000"
 
 DB_NAME="dmoj"
@@ -13,27 +12,32 @@ DB_PASS="123456"
 ADMIN_USER="admin"
 ADMIN_PASS="admin123456"
 
+fix_apt() {
+    sudo dpkg --configure -a || true
+    sudo apt --fix-broken install -y || true
+    sudo apt autoremove -y || true
+}
+
 echo "=== FIX APT ==="
-sudo dpkg --configure -a || true
-sudo apt --fix-broken install -y || true
-sudo apt autoremove -y || true
+fix_apt
 
-echo "=== BASIC TOOLS ==="
+echo "=== BASIC PACKAGES ==="
 sudo apt update
-sudo apt install -y curl git wget ca-certificates gnupg lsb-release software-properties-common
-
-echo "=== SYSTEM PACKAGES ==="
 sudo apt install -y \
-build-essential gcc g++ make pkg-config \
-python3 python3-dev python3-pip python3-venv python-is-python3 \
-libxml2-dev libxslt1-dev zlib1g-dev gettext \
-libjpeg-dev libffi-dev libssl-dev \
-redis-server memcached mariadb-server \
-libmysqlclient-dev default-libmysqlclient-dev
+    curl git wget ca-certificates gnupg lsb-release software-properties-common \
+    build-essential gcc g++ make pkg-config \
+    python3 python3-dev python3-pip python3-venv python-is-python3 \
+    libxml2-dev libxslt1-dev zlib1g-dev gettext \
+    libjpeg-dev libffi-dev libssl-dev \
+    redis-server memcached mariadb-server \
+    libmysqlclient-dev default-libmysqlclient-dev || {
+        fix_apt
+        sudo apt install -y curl git python3 python3-venv python-is-python3
+    }
 
 echo "=== DOCKER ==="
 if ! command -v docker >/dev/null 2>&1; then
-    sudo apt install -y docker.io docker-compose-plugin
+    sudo apt install -y docker.io docker-compose-plugin || true
 fi
 
 sudo systemctl enable --now docker || sudo service docker start || true
@@ -44,21 +48,16 @@ sudo npm remove -g sass postcss-cli postcss autoprefixer less clean-css-cli >/de
 sudo apt remove -y nodejs npm >/dev/null 2>&1 || true
 sudo apt autoremove -y >/dev/null 2>&1 || true
 
-if ! command -v curl >/dev/null 2>&1; then
-    sudo apt update
-    sudo apt install -y curl
-fi
-
 curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
 sudo apt install -y nodejs
 
 sudo npm install -g \
-sass@1.69.5 \
-postcss-cli@10.1.0 \
-postcss@8.4.31 \
-autoprefixer@10.4.16 \
-less@4.2.0 \
-clean-css-cli@5.6.3
+    sass@1.69.5 \
+    postcss-cli@10.1.0 \
+    postcss@8.4.31 \
+    autoprefixer@10.4.16 \
+    less@4.2.0 \
+    clean-css-cli@5.6.3
 
 echo "=== START SERVICES ==="
 sudo service mysql start || sudo service mariadb start || true
@@ -161,7 +160,7 @@ PY
 
 mkdir -p "$APP_DIR/static" "$APP_DIR/media" "$APP_DIR/problems"
 
-echo "=== FIX CSS ==="
+echo "=== FIX CSS SCRIPT ==="
 cd "$APP_DIR"
 
 chmod +x make_style.sh || true
@@ -170,6 +169,7 @@ sed -i 's/--silence-deprecation=[^ ]*//g' make_style.sh || true
 sed -i 's/--silence-deprecation//g' make_style.sh || true
 sed -i 's/python manage.py/python3 manage.py/g' make_style.sh || true
 
+echo "=== BUILD CSS ==="
 ./make_style.sh > "$APP_DIR/build.log" 2>&1 || {
     echo "CSS build warning:"
     tail -80 "$APP_DIR/build.log"
@@ -178,8 +178,41 @@ sed -i 's/python manage.py/python3 manage.py/g' make_style.sh || true
 echo "=== MIGRATE ==="
 python3 manage.py migrate --noinput
 
-echo "=== STATIC ==="
-python3 manage.py collectstatic --noinput
+echo "=== STATIC + JS I18N FIX ==="
+python3 manage.py collectstatic --noinput || true
+
+python3 manage.py compilemessages || true
+python3 manage.py compilejsi18n || true
+
+mkdir -p "$APP_DIR/static/jsi18n/vi"
+
+FOUND_DJANGOJS="$(find "$APP_DIR" -path "*jsi18n*" -name "djangojs.js" | head -1 || true)"
+
+if [ -n "$FOUND_DJANGOJS" ]; then
+    cp "$FOUND_DJANGOJS" "$APP_DIR/static/jsi18n/vi/djangojs.js" || true
+fi
+
+if [ ! -f "$APP_DIR/static/jsi18n/vi/djangojs.js" ]; then
+    cat > "$APP_DIR/static/jsi18n/vi/djangojs.js" <<JS
+/* Auto-created fallback djangojs.js */
+window.django = window.django || {};
+django.catalog = django.catalog || {};
+django.gettext = django.gettext || function(msgid){ return msgid; };
+django.ngettext = django.ngettext || function(singular, plural, count){ return count == 1 ? singular : plural; };
+django.gettext_noop = django.gettext_noop || function(msgid){ return msgid; };
+django.pgettext = django.pgettext || function(context, msgid){ return msgid; };
+django.npgettext = django.npgettext || function(context, singular, plural, count){ return count == 1 ? singular : plural; };
+django.interpolate = django.interpolate || function(fmt, obj, named){ return fmt; };
+JS
+fi
+
+mkdir -p "$APP_DIR/static/jsi18n/en"
+
+if [ ! -f "$APP_DIR/static/jsi18n/en/djangojs.js" ]; then
+    cp "$APP_DIR/static/jsi18n/vi/djangojs.js" "$APP_DIR/static/jsi18n/en/djangojs.js" || true
+fi
+
+python3 manage.py collectstatic --noinput || true
 
 echo "=== LOAD DATA ==="
 python3 manage.py loaddata navbar || true
@@ -228,11 +261,14 @@ echo ""
 echo "Log:"
 echo "tail -f ${APP_DIR}/site.log"
 echo ""
+echo "Build CSS log:"
+echo "tail -f ${APP_DIR}/build.log"
+echo ""
 echo "Docker đã cài."
-echo "Nếu dùng docker lỗi quyền, chạy:"
+echo "Nếu Docker lỗi quyền, chạy:"
 echo "newgrp docker"
 echo "======================================"
 SH
 
-chmod +x ~/lqdoj.sh
-~/lqdoj.sh
+chmod +x ~/lqd_web.sh
+~/lqd_web.sh
