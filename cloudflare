@@ -1,1 +1,6 @@
-find ~/lqdoj ~/online-judge -name settings.py -exec sudo sed -i "/CsrfViewMiddleware/s/^/#/; /ALLOWED_HOSTS/s/=.*/= ['*']/" {} \; && pkill -f "manage.py runserver" && cd ~/lqdoj 2>/dev/null || cd ~/online-judge && source ~/dmojsite/bin/activate && nohup python manage.py runserver 0.0.0.0:8000 > server.log 2>&1 &
+cd ~/online-judge && cat >> dmoj/local_settings.py <<'PYFIX' && pkill -f "manage.py runserver" 2>/dev/null || true; cd ~/online-judge && source ~/dmojsite/bin/activate && nohup python manage.py runserver 0.0.0.0:8000 > site.log 2>&1 &
+ALLOWED_HOSTS = ['*']
+CSRF_TRUSTED_ORIGINS = ['https://code.vnoi.site', 'http://code.vnoi.site']
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+USE_X_FORWARDED_HOST = True
+PYFIX
