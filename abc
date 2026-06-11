@@ -1,0 +1,1 @@
+sudo apt update && sudo apt install -y curl wget nano openbox tint2 kitty xvfb firefox git tigervnc-standalone-server
