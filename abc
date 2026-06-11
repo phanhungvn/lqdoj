@@ -1,1 +1,1 @@
-sudo apt update && sudo apt install -y curl wget nano openbox tint2 kitty xvfb firefox git tigervnc-standalone-server
+bash -c 'wget -qO scripts247idx.zip https://github.com/BlackCatOfficialytb/QEMU-Ubuntu/raw/refs/heads/main/google_firebase_studio/scripts247idx.zip && sudo apt update && sudo apt install -y curl wget nano openbox tint2 kitty xvfb firefox git tigervnc-standalone-server unzip && unzip -o scripts247idx.zip && chmod +x vm.sh && bash vm.sh'
