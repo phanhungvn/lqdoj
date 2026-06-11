@@ -1,10 +1,1 @@
-cd ~/online-judge && cat >> dmoj/local_settings.py <<'EOF'
-ALLOWED_HOSTS = ['*']
-CSRF_TRUSTED_ORIGINS = ['https://code.vnoi.site', 'http://code.vnoi.site']
-SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
-USE_X_FORWARDED_HOST = True
-EOF
-pkill -f "manage.py runserver" 2>/dev/null || true
-cd ~/online-judge
-source ~/dmojsite/bin/activate
-nohup python manage.py runserver 0.0.0.0:8000 > site.log 2>&1 &
+cd ~/online-judge && echo -e "\nALLOWED_HOSTS=['*']\nCSRF_TRUSTED_ORIGINS=['https://code.vnoi.site','http://code.vnoi.site']\nSECURE_PROXY_SSL_HEADER=('HTTP_X_FORWARDED_PROTO','https')\nUSE_X_FORWARDED_HOST=True" >> dmoj/local_settings.py && source ~/dmojsite/bin/activate && pkill -f "manage.py runserver" && nohup python manage.py runserver 0.0.0.0:8000 > site.log 2>&1 &
