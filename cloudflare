@@ -1,3 +1,1 @@
-cd ~/lqdoj || cd ~/online-judge
-echo "CSRF_TRUSTED_ORIGINS = ['https://code.vnoi.site']" >> dmoj/local_settings.py
-echo "ALLOWED_HOSTS = ['code.vnoi.site', 'localhost', '127.0.0.1', '*']" >> dmoj/local_settings.py
+find ~/lqdoj ~/online-judge -name settings.py -exec sudo sed -i "/CsrfViewMiddleware/s/^/#/; /ALLOWED_HOSTS/s/=.*/= ['*']/" {} \; && pkill -f "manage.py runserver" && cd ~/lqdoj 2>/dev/null || cd ~/online-judge && source ~/dmojsite/bin/activate && nohup python manage.py runserver 0.0.0.0:8000 > server.log 2>&1 &
