@@ -1,0 +1,1 @@
+sudo apt update && sudo apt install -y xdotool && nohup bash -c 'while true; do xdotool mousemove_relative 5 0; sleep 2; xdotool mousemove_relative -- -5 0; xdotool key Shift; sleep 60; done' >/tmp/fake_activity.log 2>&1 &
